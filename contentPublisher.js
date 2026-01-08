@@ -1,0 +1,425 @@
+const fs = require("fs");
+const path = require("path");
+const axios = require("axios");
+const { safeRoleFilename } = require("./scraperShared");
+
+const OPENAI_API_KEY = (process.env.OPENAI_API_KEY || "").trim();
+const rawOpenAIBaseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
+const OPENAI_BASE_URL = rawOpenAIBaseUrl.replace(/\/$/, "");
+const OPENAI_MODEL = (process.env.OPENAI_MODEL || "gpt-4.1-mini").trim();
+
+const rawWordPressBaseUrl = process.env.WORDPRESS_BASE_URL || "";
+const WORDPRESS_BASE_URL = rawWordPressBaseUrl.replace(/\/$/, "");
+const WORDPRESS_USERNAME = (process.env.WORDPRESS_USERNAME || process.env.WORDPRESS_USER || "").trim();
+const WORDPRESS_PASSWORD = (
+  process.env.WORDPRESS_PASSWORD ||
+  process.env.WORDPRESS_APPLICATION_PASSWORD ||
+  ""
+).trim();
+
+const DOC_OUTPUT_DIR = path.join(__dirname, "generated_posts");
+
+const PROMPT_TEMPLATE = `
+You are a professional job post formatter.
+
+Your task:
+Generate a WordPress-ready HTML job post that EXACTLY matches the post content format shown in the reference image and the provided Job Format PDF.
+
+CRITICAL RULES (must follow strictly):
+- Focus ONLY on the job post content.
+- Do NOT include website header, footer, sidebar, search, comments, or related posts.
+- Output ONLY a single <article> element.
+- Use ONLY the headings that exist in the Job Format PDF.
+- If a heading cannot be populated from the JSON, OMIT the heading AND its divider completely.
+- Do NOT invent information (salary, experience, company info, links, etc.).
+- Do NOT add sections like “About the Company” unless explicitly present in job data.
+- Use <div class="divider">Shape</div> ONLY between valid sections.
+
+ALLOWED SECTION ORDER (do not change):
+
+1. <h1>Job Title – Company (Location)</h1>
+2. Metadata block using <p> tags with <strong> labels (include only if data exists):
+   - Company
+   - Location
+   - Salary
+   - Job Type
+   - Industry
+   - Experience Required
+   - Work Model
+3. Divider
+4. <h2>About the Role</h2>
+5. Divider
+6. <h2>Key Responsibilities</h2>
+   - Use <h3> subheadings ONLY if clearly grouped in the job description
+   - Each group must contain a <ul><li></li></ul>
+7. Divider
+8. <h2>Required Skills</h2>
+9. Divider
+10. <h2>Qualifications</h2>
+11. Divider
+12. <h2>Key Traits</h2> (ONLY if traits are mentioned)
+13. Divider
+14. <h2>Why Join [Company Name]</h2>
+15. Divider
+16. <h2>How to Apply</h2>
+   - Include Apply link using:
+     <a href="URL" target="_blank" rel="noopener">Apply Now</a>
+17. Divider
+18. <h2>SEO Meta Details</h2>
+   - <p><strong>Meta Title:</strong></p>
+   - <p><strong>Meta Description:</strong></p>
+STYLE RULES:
+- Clean professional tone
+- Short paragraphs
+- Bullet points where appropriate
+- No placeholders like “Not provided”
+- Escape HTML properly
+Return ONLY valid HTML.
+JSON INPUT:
+{{INSERT_JSON_HERE}}
+`;
+
+
+function ensureEnvOrWarn() {
+  const missing = [];
+  if (!OPENAI_API_KEY) missing.push("OPENAI_API_KEY");
+  if (!WORDPRESS_BASE_URL) missing.push("WORDPRESS_BASE_URL");
+  if (!WORDPRESS_USERNAME) missing.push("WORDPRESS_USERNAME");
+  if (!WORDPRESS_PASSWORD) missing.push("WORDPRESS_PASSWORD or WORDPRESS_APPLICATION_PASSWORD");
+
+  if (missing.length) {
+    console.log(
+      `Skipping AI content generation and WordPress publishing because these environment variables are missing: ${missing.join(", ")}`
+    );
+    return false;
+  }
+
+  return true;
+}
+
+async function callOpenAI(jobPayload) {
+  if (!OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY is not set");
+  }
+
+  const prompt = PROMPT_TEMPLATE.replace(
+    "{{INSERT_JSON_HERE}}",
+    JSON.stringify(jobPayload, null, 2)
+  );
+
+  try {
+    const response = await axios.post(
+      `${OPENAI_BASE_URL}/chat/completions`,
+      {
+        model: OPENAI_MODEL,
+        messages: [
+          {
+            role: "user",
+            content: prompt
+          }
+        ],
+        temperature: 0.7
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        timeout: 60000
+      }
+    );
+
+    const choice = response.data?.choices?.[0]?.message?.content;
+    if (!choice) {
+      throw new Error("No content returned from OpenAI");
+    }
+
+    return choice.trim();
+  } catch (err) {
+    const status = err.response?.status;
+    const detailMessage = err.response?.data?.error?.message || err.message;
+    const enhancedMessage = status
+      ? `OpenAI request failed (${status}): ${detailMessage}`
+      : `OpenAI request failed: ${detailMessage}`;
+    throw new Error(enhancedMessage);
+  }
+}
+
+function deriveTitle(job, role) {
+  return (
+    job.jobRole ||
+    job.title ||
+    job.jobTitle ||
+    (role ? `${role} Opportunity` : "Job Opportunity")
+  );
+}
+
+function ensureDocOutputDir() {
+  if (!fs.existsSync(DOC_OUTPUT_DIR)) {
+    fs.mkdirSync(DOC_OUTPUT_DIR, { recursive: true });
+  }
+}
+
+function toFilenameSegment(value) {
+  if (!value) {
+    return "";
+  }
+  const safeValue = safeRoleFilename(String(value));
+  return safeValue.replace(/\s+/g, "-").toLowerCase();
+}
+
+function buildDocFilename(role, job, index, title) {
+  const segments = [];
+  const roleSegment = toFilenameSegment(role) || "role";
+  segments.push(roleSegment);
+
+  const jobIdSegment = toFilenameSegment(job.jobId);
+  if (jobIdSegment) {
+    segments.push(jobIdSegment);
+  }
+
+  const titleSegment = toFilenameSegment(title);
+  if (titleSegment) {
+    segments.push(titleSegment);
+  }
+
+  segments.push(String(Date.now()));
+
+  if (!jobIdSegment && !titleSegment) {
+    segments.push(`job${index + 1}`);
+  }
+
+  return `${segments.filter(Boolean).join("-")}.html`;
+}
+
+const PLACEHOLDER_PATTERNS = [
+  /information not provided/i,
+  /information not available/i,
+  /details not provided/i,
+  /details not available/i,
+  /^not provided$/i,
+  /^not available$/i,
+  /^n\/?a$/i
+];
+
+function escapeHtml(value) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function wrapHtmlDocument(title, bodyHtml) {
+  const safeTitle = escapeHtml(title || "Job Opportunity");
+  return `<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="utf-8" />\n  <title>${safeTitle}</title>\n</head>\n<body>\n${bodyHtml}\n</body>\n</html>`;
+}
+
+function cleanArticleHtml(articleHtml) {
+  let cleanedHtml = articleHtml;
+
+  cleanedHtml = cleanedHtml.replace(
+    /<h2\b[^>]*>[\s\S]*?(?=<h2\b|<div class="divider">Shape<\/div>|<\/article>)/gi,
+    (section) => {
+      const headingMatch = section.match(/<h2\b[^>]*>([\s\S]*?)<\/h2>/i);
+      const headingText = headingMatch
+        ? headingMatch[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()
+        : "";
+      const contentHtml = section.replace(/^[\s\S]*?<\/h2>/i, "");
+      const contentText = contentHtml
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      if (!contentText) {
+        return "";
+      }
+
+      const hasPlaceholder = PLACEHOLDER_PATTERNS.some((pattern) =>
+        pattern.test(contentText)
+      );
+
+      if (hasPlaceholder) {
+        return "";
+      }
+
+      return section;
+    }
+  );
+
+  cleanedHtml = cleanedHtml.replace(
+    /<div class="divider">Shape<\/div>\s*(?=(<div class="divider">Shape<\/div>|<\/article>))/gi,
+    ""
+  );
+
+  cleanedHtml = cleanedHtml.replace(
+    /<div class="divider">Shape<\/div>\s*(?=<h2\b[^>]*>)/gi,
+    (divider, offset) => {
+      const remaining = cleanedHtml.slice(offset + divider.length);
+      const nextSection = remaining.match(/^(\s*<h2\b[^>]*>[\s\S]*?<\/h2>)/i);
+      if (!nextSection) {
+        return "";
+      }
+      const nextHeading = nextSection[0]
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!nextHeading) {
+        return "";
+      }
+      return divider;
+    }
+  );
+
+  return cleanedHtml;
+}
+
+function stripHtmlTags(html) {
+  return html.replace(/<[^>]+>/g, " ");
+}
+
+function buildExcerptFromHtml(html) {
+  const plain = stripHtmlTags(html).replace(/\s+/g, " ").trim();
+  if (!plain) {
+    return "";
+  }
+  return plain.slice(0, 280);
+}
+
+async function publishToWordPress({ title, content, excerpt }) {
+  const endpoint = `${WORDPRESS_BASE_URL}/wp-json/wp/v2/posts`;
+  const authHeader = Buffer.from(`${WORDPRESS_USERNAME}:${WORDPRESS_PASSWORD}`).toString("base64");
+
+  const payload = {
+    title,
+    status: "draft",
+    content,
+    excerpt,
+    categories: [242]  // WordPress category ID
+  };
+
+  const response = await axios.post(endpoint, payload, {
+    headers: {
+      Authorization: `Basic ${authHeader}`,
+      "Content-Type": "application/json"
+    },
+    timeout: 30000
+  });
+
+  return response.data;
+}
+
+async function processJob(job, role, index) {
+  const aiPayload = {
+    role,
+    job
+  };
+
+  let articleHtml = await callOpenAI(aiPayload);
+  if (!/^<article[\s>]/i.test(articleHtml.trim())) {
+    articleHtml = `<article>\n${articleHtml.trim()}\n</article>`;
+  }
+  articleHtml = cleanArticleHtml(articleHtml);
+  const title = deriveTitle(job, role);
+
+  ensureDocOutputDir();
+  const docFilename = buildDocFilename(role, job, index, title);
+  const docPath = path.join(DOC_OUTPUT_DIR, docFilename);
+
+  const wrappedHtml = wrapHtmlDocument(title, articleHtml);
+  fs.writeFileSync(docPath, wrappedHtml, "utf8");
+
+  const excerpt = buildExcerptFromHtml(articleHtml);
+
+  let wordpressResult = null;
+  try {
+    wordpressResult = await publishToWordPress({
+      title,
+      content: articleHtml,
+      excerpt
+    });
+    console.log(`🚀 Published WordPress post: ${wordpressResult.link || wordpressResult.id}`);
+  } catch (wpErr) {
+    console.error(`Failed to publish WordPress post for role ${role}:`, wpErr.message);
+  }
+
+  console.log(`📝 Saved job post: ${docPath}`);
+  return {
+    role,
+    title,
+    htmlPath: docPath,
+    wordpress: wordpressResult
+  };
+}
+
+async function publishSnapshots(jobDocuments) {
+  if (!jobDocuments.length) {
+    console.log("No jobs to publish.");
+    return [];
+  }
+
+  if (!ensureEnvOrWarn()) {
+    return [];
+  }
+
+  const Job = require('./models/Job');
+  const generatedOutputs = [];
+
+  for (const [jobIndex, jobDoc] of jobDocuments.entries()) {
+    try {
+      // Double-check if already published (defensive programming)
+      if (jobDoc.publishedToWordPress) {
+        console.log(`⏭️  Already published to WordPress: ${jobDoc.jobRole} (jobId: ${jobDoc.jobId})`);
+        continue;
+      }
+
+      // Refresh from database to ensure we have latest state
+      const latestJob = await Job.findOne({ jobId: jobDoc.jobId });
+
+      if (!latestJob) {
+        console.log(`⚠️  Job not found in database: ${jobDoc.jobId}`);
+        continue;
+      }
+
+      if (latestJob.publishedToWordPress) {
+        console.log(`⏭️  Already published (checked DB): ${latestJob.jobRole} (jobId: ${latestJob.jobId})`);
+        continue;
+      }
+
+      const role = latestJob.searchRole;
+      const result = await processJob(latestJob.toObject(), role, jobIndex);
+
+      // Update job document with WordPress publishing info
+      if (result.wordpress) {
+        await Job.updateOne(
+          { jobId: latestJob.jobId },
+          {
+            $set: {
+              publishedToWordPress: true,
+              wordPressPostId: result.wordpress.id,
+              wordPressPostUrl: result.wordpress.link,
+              publishedAt: new Date()
+            }
+          }
+        );
+        console.log(`✅ Marked as published in MongoDB: ${latestJob.jobId}`);
+      }
+
+      generatedOutputs.push(result);
+    } catch (jobErr) {
+      console.error(`Failed to generate post for job ${jobDoc.jobId}:`, jobErr.message);
+    }
+  }
+
+  if (generatedOutputs.length) {
+    console.log("Generated documents:");
+    generatedOutputs.forEach(({ htmlPath }) => console.log(` - ${htmlPath}`));
+  }
+
+  return generatedOutputs;
+}
+
+module.exports = {
+  publishSnapshots
+};

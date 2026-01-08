@@ -1,0 +1,4 @@
+jobs/
+generated_posts/
+node_modules/
+.env
