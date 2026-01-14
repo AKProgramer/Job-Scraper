@@ -17,27 +17,98 @@ const WORDPRESS_PASSWORD = (
   ""
 ).trim();
 
+const rawSecondWordPressBaseUrl =
+  process.env.WORDPRESS_SECOND_BASE_URL ||
+  process.env.WP_SECOND_BASE_URL ||
+  "https://jobsmagzine.protogroup.co";
+const WORDPRESS_SECOND_BASE_URL = rawSecondWordPressBaseUrl.replace(/\/$/, "");
+const WORDPRESS_SECOND_USERNAME = (
+  process.env.WORDPRESS_SECOND_USERNAME ||
+  process.env.WP_SECOND_USERNAME ||
+  "Muneed"
+).trim();
+const WORDPRESS_SECOND_PASSWORD = (
+  process.env.WORDPRESS_SECOND_PASSWORD ||
+  process.env.WP_SECOND_PASSWORD ||
+  process.env.WORDPRESS_SECOND_APPLICATION_PASSWORD ||
+  "1LDU xc42 goaj Sphb 1FVg yMZm"
+).trim();
+const WORDPRESS_PRIMARY_LABEL = (process.env.WORDPRESS_PRIMARY_LABEL || "Primary WordPress Site").trim();
+const WORDPRESS_SECOND_LABEL = (process.env.WORDPRESS_SECOND_LABEL || "JobsMagzine").trim();
+
 const DOC_OUTPUT_DIR = path.join(__dirname, "generated_posts");
 
+function parseCategoryIds(rawValue, fallback = [242]) {
+  if (!rawValue) {
+    return Array.isArray(fallback) ? [...fallback] : [fallback];
+  }
+
+  const parsed = String(rawValue)
+    .split(",")
+    .map((segment) => parseInt(segment.trim(), 10))
+    .filter((id) => !Number.isNaN(id) && id > 0);
+
+  if (parsed.length) {
+    return parsed;
+  }
+
+  return Array.isArray(fallback) ? [...fallback] : [fallback];
+}
+
+const PRIMARY_CATEGORY_IDS = parseCategoryIds(process.env.WORDPRESS_CATEGORY_IDS, [242]);
+const SECONDARY_CATEGORY_IDS = parseCategoryIds(
+  process.env.WORDPRESS_SECOND_CATEGORY_IDS || process.env.WP_SECOND_CATEGORY_IDS,
+  PRIMARY_CATEGORY_IDS
+);
+
+const WORDPRESS_SITES = {
+  primary: {
+    key: "primary",
+    label: WORDPRESS_PRIMARY_LABEL,
+    baseUrl: WORDPRESS_BASE_URL,
+    username: WORDPRESS_USERNAME,
+    password: WORDPRESS_PASSWORD,
+    categories: PRIMARY_CATEGORY_IDS
+  },
+  secondary: {
+    key: "secondary",
+    label: WORDPRESS_SECOND_LABEL,
+    baseUrl: WORDPRESS_SECOND_BASE_URL,
+    username: WORDPRESS_SECOND_USERNAME,
+    password: WORDPRESS_SECOND_PASSWORD,
+    categories: SECONDARY_CATEGORY_IDS
+  }
+};
+
 const PROMPT_TEMPLATE = `
-You are a professional job post formatter.
+You are a professional job content writer and editor.
 
 Your task:
-Generate a WordPress-ready HTML job post that EXACTLY matches the post content format shown in the reference image and the provided Job Format PDF.
+Rewrite and professionally rephrase the provided job data into an ORIGINAL, human-written job post.
+The final content must NOT copy wording, sentence structure, or phrasing from Indeed or any source.
+All text must be written in your own natural, professional wording while preserving the original meaning.
 
-CRITICAL RULES (must follow strictly):
+CRITICAL CONTENT RULES (must follow strictly):
+- DO NOT copy sentences verbatim from the source.
+- DO NOT closely mirror sentence structure or phrasing.
+- Rewrite everything in clear, natural, human-like language.
+- Ensure the content reads as manually written by a professional recruiter.
+- Avoid repetitive, robotic, or AI-detectable phrasing.
+- Maintain factual accuracy — do NOT invent details.
+
+STRUCTURE & OUTPUT RULES:
 - Focus ONLY on the job post content.
 - Do NOT include website header, footer, sidebar, search, comments, or related posts.
 - Output ONLY a single <article> element.
 - Use ONLY the headings that exist in the Job Format PDF.
 - If a heading cannot be populated from the JSON, OMIT the heading AND its divider completely.
-- Do NOT invent information (salary, experience, company info, links, etc.).
 - Do NOT add sections like “About the Company” unless explicitly present in job data.
 - Use <div class="divider">Shape</div> ONLY between valid sections.
 
 ALLOWED SECTION ORDER (do not change):
 
 1. <h1>Job Title – Company (Location)</h1>
+
 2. Metadata block using <p> tags with <strong> labels (include only if data exists):
    - Company
    - Location
@@ -46,50 +117,89 @@ ALLOWED SECTION ORDER (do not change):
    - Industry
    - Experience Required
    - Work Model
+
 3. Divider
+
 4. <h2>About the Role</h2>
+   - Write a concise, engaging summary in ORIGINAL wording.
+   - Do not reuse source phrasing.
+
 5. Divider
+
 6. <h2>Key Responsibilities</h2>
-   - Use <h3> subheadings ONLY if clearly grouped in the job description
-   - Each group must contain a <ul><li></li></ul>
+   - Rewrite responsibilities using fresh sentence structure.
+   - Use bullet points.
+   - Use <h3> subheadings ONLY if responsibilities are clearly grouped.
+
 7. Divider
+
 8. <h2>Required Skills</h2>
+   - List skills using rewritten, natural language.
+
 9. Divider
+
 10. <h2>Qualifications</h2>
+    - Rephrase education and experience requirements clearly.
+
 11. Divider
-12. <h2>Key Traits</h2> (ONLY if traits are mentioned)
+
+12. <h2>Key Traits</h2>
+    - ONLY include if traits are explicitly mentioned in the job data.
+
 13. Divider
+
 14. <h2>Why Join [Company Name]</h2>
+    - Rewrite benefits and reasons in an appealing, original tone.
+
 15. Divider
+
 16. <h2>How to Apply</h2>
-   - Include Apply link using:
-     <a href="URL" target="_blank" rel="noopener">Apply Now</a>
+    - Include apply link exactly as:
+      <a href="URL" target="_blank" rel="noopener">Apply Now</a>
+
 17. Divider
+
 18. <h2>SEO Meta Details</h2>
-   - <p><strong>Meta Title:</strong></p>
-   - <p><strong>Meta Description:</strong></p>
+    - <p><strong>Meta Title:</strong> Write an original SEO-friendly title</p>
+    - <p><strong>Meta Description:</strong> Write a natural, human-sounding meta description</p>
+
 STYLE RULES:
-- Clean professional tone
-- Short paragraphs
+- Professional, recruiter-style tone
+- Short, clear paragraphs
 - Bullet points where appropriate
+- No filler phrases
 - No placeholders like “Not provided”
+- Avoid generic AI phrases (e.g., “We are seeking a dynamic individual”)
 - Escape HTML properly
+
+IMPORTANT:
+Your goal is originality, clarity, and professionalism — NOT duplication.
+
 Return ONLY valid HTML.
+
 JSON INPUT:
 {{INSERT_JSON_HERE}}
 `;
 
+function getWordPressSiteConfig(siteKey = "primary") {
+  return WORDPRESS_SITES[siteKey] || WORDPRESS_SITES.primary || null;
+}
 
-function ensureEnvOrWarn() {
+function ensureEnvOrWarn(siteConfig) {
+  if (!siteConfig) {
+    console.log("Skipping AI content generation and WordPress publishing because no WordPress site configuration was provided.");
+    return false;
+  }
+
   const missing = [];
   if (!OPENAI_API_KEY) missing.push("OPENAI_API_KEY");
-  if (!WORDPRESS_BASE_URL) missing.push("WORDPRESS_BASE_URL");
-  if (!WORDPRESS_USERNAME) missing.push("WORDPRESS_USERNAME");
-  if (!WORDPRESS_PASSWORD) missing.push("WORDPRESS_PASSWORD or WORDPRESS_APPLICATION_PASSWORD");
+  if (!siteConfig.baseUrl) missing.push(`${siteConfig.label || siteConfig.key}: WORDPRESS_BASE_URL`);
+  if (!siteConfig.username) missing.push(`${siteConfig.label || siteConfig.key}: WORDPRESS_USERNAME`);
+  if (!siteConfig.password) missing.push(`${siteConfig.label || siteConfig.key}: WORDPRESS_PASSWORD or WORDPRESS_APPLICATION_PASSWORD`);
 
   if (missing.length) {
     console.log(
-      `Skipping AI content generation and WordPress publishing because these environment variables are missing: ${missing.join(", ")}`
+      `Skipping AI content generation and WordPress publishing for "${siteConfig.label || siteConfig.key}" because these environment variables are missing: ${missing.join(", ")}`
     );
     return false;
   }
@@ -287,16 +397,22 @@ function buildExcerptFromHtml(html) {
   return plain.slice(0, 280);
 }
 
-async function publishToWordPress({ title, content, excerpt }) {
-  const endpoint = `${WORDPRESS_BASE_URL}/wp-json/wp/v2/posts`;
-  const authHeader = Buffer.from(`${WORDPRESS_USERNAME}:${WORDPRESS_PASSWORD}`).toString("base64");
+async function publishToWordPress({ title, content, excerpt }, siteConfig) {
+  if (!siteConfig?.baseUrl) {
+    throw new Error("WordPress base URL is not configured");
+  }
+
+  const endpoint = `${siteConfig.baseUrl}/wp-json/wp/v2/posts`;
+  const authHeader = Buffer.from(`${siteConfig.username}:${siteConfig.password}`).toString("base64");
+  const categories =
+    Array.isArray(siteConfig.categories) && siteConfig.categories.length ? siteConfig.categories : [242];
 
   const payload = {
     title,
     status: "draft",
     content,
     excerpt,
-    categories: [242]  // WordPress category ID
+    categories
   };
 
   const response = await axios.post(endpoint, payload, {
@@ -310,7 +426,7 @@ async function publishToWordPress({ title, content, excerpt }) {
   return response.data;
 }
 
-async function processJob(job, role, index) {
+async function processJob(job, role, index, siteConfig) {
   const aiPayload = {
     role,
     job
@@ -333,15 +449,24 @@ async function processJob(job, role, index) {
   const excerpt = buildExcerptFromHtml(articleHtml);
 
   let wordpressResult = null;
+  const siteLabel = siteConfig?.label || siteConfig?.key || "WordPress";
   try {
-    wordpressResult = await publishToWordPress({
-      title,
-      content: articleHtml,
-      excerpt
-    });
-    console.log(`🚀 Published WordPress post: ${wordpressResult.link || wordpressResult.id}`);
+    wordpressResult = await publishToWordPress(
+      {
+        title,
+        content: articleHtml,
+        excerpt
+      },
+      siteConfig
+    );
+    console.log(
+      `🚀 Published WordPress post (${siteLabel}): ${wordpressResult.link || wordpressResult.id}`
+    );
   } catch (wpErr) {
-    console.error(`Failed to publish WordPress post for role ${role}:`, wpErr.message);
+    console.error(
+      `Failed to publish WordPress post for role ${role} on ${siteLabel}:`,
+      wpErr.message
+    );
   }
 
   console.log(`📝 Saved job post: ${docPath}`);
@@ -349,22 +474,30 @@ async function processJob(job, role, index) {
     role,
     title,
     htmlPath: docPath,
-    wordpress: wordpressResult
+    wordpress: wordpressResult,
+    wordpressSite: siteConfig?.key || "primary"
   };
 }
 
-async function publishSnapshots(jobDocuments) {
+async function publishSnapshots(jobDocuments, options = {}) {
   if (!jobDocuments.length) {
     console.log("No jobs to publish.");
     return [];
   }
 
-  if (!ensureEnvOrWarn()) {
+  const siteKey = options.siteKey || "primary";
+  const siteConfig = getWordPressSiteConfig(siteKey);
+
+  if (!ensureEnvOrWarn(siteConfig)) {
     return [];
   }
 
   const Job = require('./models/Job');
   const generatedOutputs = [];
+
+  console.log(
+    `Publishing drafts to ${siteConfig?.label || siteConfig?.key} (${siteConfig?.baseUrl || "not configured"})`
+  );
 
   for (const [jobIndex, jobDoc] of jobDocuments.entries()) {
     try {
@@ -388,7 +521,7 @@ async function publishSnapshots(jobDocuments) {
       }
 
       const role = latestJob.searchRole;
-      const result = await processJob(latestJob.toObject(), role, jobIndex);
+      const result = await processJob(latestJob.toObject(), role, jobIndex, siteConfig);
 
       // Update job document with WordPress publishing info
       if (result.wordpress) {
@@ -414,12 +547,15 @@ async function publishSnapshots(jobDocuments) {
 
   if (generatedOutputs.length) {
     console.log("Generated documents:");
-    generatedOutputs.forEach(({ htmlPath }) => console.log(` - ${htmlPath}`));
+    generatedOutputs.forEach(({ htmlPath, wordpressSite }) =>
+      console.log(` - ${htmlPath} [${wordpressSite || siteKey}]`)
+    );
   }
 
   return generatedOutputs;
 }
 
 module.exports = {
-  publishSnapshots
+  publishSnapshots,
+  WORDPRESS_SITES
 };

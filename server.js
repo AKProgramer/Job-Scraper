@@ -4,7 +4,7 @@ const readline = require('readline');
 const { connectDB } = require('./db');
 const { scrapeRoles: scrapeIndeedRoles } = require('./IndeedScraper');
 const { scrapeRoles: scrapeRozeeRoles } = require('./RozeeScraper');
-const { publishSnapshots } = require('./contentPublisher');
+const { publishSnapshots, WORDPRESS_SITES } = require('./contentPublisher');
 
 const SCRAPER_PLATFORMS = {
     indeed: {
@@ -17,7 +17,7 @@ const SCRAPER_PLATFORMS = {
     }
 };
 
-function createPrompt() {
+function createPrompt(wordpressSites = {}) {
     const rl = readline.createInterface({
         input: process.stdin,
         output: process.stdout
@@ -28,6 +28,20 @@ function createPrompt() {
             rl.question(question, resolve);
         });
 
+    const siteEntries = Object.entries(
+        Object.keys(wordpressSites).length ? wordpressSites : { primary: { key: 'primary', label: 'Primary WordPress Site' } }
+    );
+    const siteKeys = siteEntries.map(([key]) => key);
+    const sitePrompt = [
+        '\nSelect the WordPress site to publish drafts:',
+        ...siteEntries.map(([key, site], index) => {
+            const details = site.baseUrl ? ` - ${site.baseUrl}` : '';
+            const status = site.baseUrl && site.username && site.password ? '' : ' (incomplete config)';
+            return `  ${index + 1}) ${site.label || key}${details}${status}`;
+        }),
+        ''
+    ].join('\n');
+
     const platformPrompt = [
         '\nSelect the job platform to scrape first:',
         '  1) Indeed.com',
@@ -35,6 +49,22 @@ function createPrompt() {
         '  3) Both platforms',
         ''
     ].join('\n');
+
+    const parsePublishingSite = (input) => {
+        const normalized = input.trim().toLowerCase();
+        const numeric = parseInt(normalized, 10);
+        if (!Number.isNaN(numeric) && numeric >= 1 && numeric <= siteKeys.length) {
+            return siteKeys[numeric - 1];
+        }
+
+        const matchByKey = siteKeys.find((key) => key.toLowerCase() === normalized);
+        if (matchByKey) {
+            return matchByKey;
+        }
+
+        const matchByLabel = siteEntries.find(([, site]) => (site.label || '').toLowerCase() === normalized);
+        return matchByLabel ? matchByLabel[0] : null;
+    };
 
     const parsePlatformSelection = (input) => {
         const normalized = input.trim().toLowerCase();
@@ -51,6 +81,16 @@ function createPrompt() {
     };
 
     return {
+        async requestPublishingSite() {
+            while (true) {
+                const selection = await ask(`${sitePrompt}Enter choice: `);
+                const parsed = parsePublishingSite(selection);
+                if (parsed) {
+                    return parsed;
+                }
+                console.log('Invalid selection. Please choose a valid WordPress site option.');
+            }
+        },
         async requestPlatform() {
             while (true) {
                 const rawSelection = await ask(`${platformPrompt}> `);
@@ -96,14 +136,19 @@ async function run() {
         process.exit(1);
     }
 
-    const prompt = createPrompt();
+    const prompt = createPrompt(WORDPRESS_SITES);
 
     let selectedPlatforms = [];
     let roles = [];
+    let publishingSiteKey = 'primary';
 
     try {
-        selectedPlatforms = await prompt.requestPlatform();
+        publishingSiteKey = await prompt.requestPublishingSite();
+        const siteLabel = WORDPRESS_SITES[publishingSiteKey]?.label || publishingSiteKey;
+        console.log(`\n📰 Selected WordPress site: ${siteLabel}`);
+
         roles = await prompt.requestRoles();
+        selectedPlatforms = await prompt.requestPlatform();
     } finally {
         prompt.close();
     }
@@ -136,11 +181,13 @@ async function run() {
         return;
     }
 
-    const generatedResults = await publishSnapshots(aggregatedJobs);
+    const generatedResults = await publishSnapshots(aggregatedJobs, { siteKey: publishingSiteKey });
     if (generatedResults.length) {
         console.log('\n📝 AI-generated posts:');
         generatedResults.forEach((result) => {
-            console.log(` - ${result.htmlPath}`);
+            const resultSiteKey = result.wordpressSite || publishingSiteKey;
+            const siteLabel = WORDPRESS_SITES[resultSiteKey]?.label || resultSiteKey;
+            console.log(` - ${result.htmlPath} [${siteLabel}]`);
             if (result.wordpress?.link) {
                 console.log(`   WordPress URL: ${result.wordpress.link}`);
             }

@@ -54,9 +54,14 @@ const BASE_URL = "https://www.indeed.com/jobs?q=";
 const DESKTOP_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36";
 const OUTPUT_DIR = path.join(__dirname, "jobs");
+const DEBUG_DIR = path.join(__dirname, "debug_snapshots");
 
 if (!fs.existsSync(OUTPUT_DIR)) {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+}
+
+if (!fs.existsSync(DEBUG_DIR)) {
+  fs.mkdirSync(DEBUG_DIR, { recursive: true });
 }
 
 // ---------------------------------------
@@ -78,6 +83,76 @@ async function autoScroll(page) {
       }, 200);
     });
   });
+}
+
+async function pause(page, durationMs) {
+  if (page && typeof page.waitForTimeout === "function") {
+    await page.waitForTimeout(durationMs);
+    return;
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, durationMs));
+}
+
+async function clickIfVisible(page, selector, options = {}) {
+  try {
+    await page.waitForSelector(selector, { timeout: 2500, visible: true });
+  } catch (err) {
+    return false;
+  }
+
+  const handle = await page.$(selector);
+  if (!handle) {
+    return false;
+  }
+
+  try {
+    await handle.click({ delay: 30, ...options });
+    await sleep(400);
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+async function dismissConsentAndPopups(page) {
+  const selectors = [
+    "#onetrust-accept-btn-handler",
+    "button#onetrust-accept-btn-handler",
+    "button[data-testid='close-modal']",
+    "button[aria-label='Close']",
+    "button[aria-label='Dismiss']",
+    "button.icl-CloseButton",
+    "div[role='dialog'] button[data-testid='close']"
+  ];
+
+  for (const selector of selectors) {
+    await clickIfVisible(page, selector);
+  }
+}
+
+async function saveDebugSnapshot(page, role, label) {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const safeRole = (role || "role").replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase() || "role";
+  const safeLabel = (label || "snapshot").replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase() || "snapshot";
+  const baseName = `${safeRole}-${safeLabel}-${timestamp}`;
+
+  try {
+    const htmlPath = path.join(DEBUG_DIR, `${baseName}.html`);
+    const htmlContent = await page.content();
+    fs.writeFileSync(htmlPath, htmlContent, "utf8");
+    console.log(`🕵️ Saved debug HTML: ${htmlPath}`);
+  } catch (err) {
+    console.log(`⚠️ Unable to save debug HTML: ${err.message}`);
+  }
+
+  try {
+    const screenshotPath = path.join(DEBUG_DIR, `${baseName}.png`);
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+    console.log(`🕵️ Saved debug screenshot: ${screenshotPath}`);
+  } catch (err) {
+    console.log(`⚠️ Unable to capture debug screenshot: ${err.message}`);
+  }
 }
 
 const ALT_APPLICATION_TEXT = /if you require alternative methods/i;
@@ -355,49 +430,138 @@ async function scrapeRole(page, role) {
   console.log(`🌐 Navigating to: ${url}`);
 
   await page.goto(url, { waitUntil: "networkidle2", timeout: 0 });
+  await dismissConsentAndPopups(page);
+  await pause(page, 1500);
   await autoScroll(page);
   await sleep(2000);
+  await dismissConsentAndPopups(page);
+
+  const jobAnchorSelector = "a[data-testid='jobTitle'], a.jcs-JobTitle, a[data-jk], a[data-mobtk], a.tapItem";
+  try {
+    await page.waitForSelector(jobAnchorSelector, { timeout: 15000 });
+  } catch (err) {
+    console.log("⚠️  Job cards did not render within timeout. Continuing anyway.");
+  }
 
   const jobs = await page.evaluate(() => {
     const results = [];
-    const cards = document.querySelectorAll("div.job_seen_beacon");
 
-    cards.forEach((card) => {
-      const anchor = card.querySelector("h2.jobTitle a");
+    const getFallbackText = (root, selectors) => {
+      for (const selector of selectors) {
+        const node = root.querySelector(selector);
+        const text = node?.innerText?.replace(/\s+/g, " ").trim();
+        if (text) {
+          return text;
+        }
+      }
+      return "";
+    };
+
+    const anchorSelectors = [
+      "a[data-testid='jobTitle']",
+      "a[data-jk]",
+      "a[data-mobtk]",
+      "a.jcs-JobTitle",
+      "a.tapItem",
+      "h2.jobTitle a"
+    ];
+
+    const anchors = new Set();
+    anchorSelectors.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((anchor) => anchors.add(anchor));
+    });
+
+    const seenLinks = new Set();
+
+    anchors.forEach((anchor) => {
+      const card =
+        anchor.closest("div.job_seen_beacon") ||
+        anchor.closest("div.cardOutline") ||
+        anchor.closest("div.resultContent") ||
+        anchor.closest("div.jobCard_mainContent") ||
+        anchor.closest("li") ||
+        anchor;
+
       const title =
-        anchor?.getAttribute("aria-label")?.trim() || anchor?.innerText?.trim() || "";
-      const company =
-        card.querySelector("span.companyName")?.innerText?.trim() || "";
-      const location =
-        card.querySelector("div.companyLocation")?.innerText?.trim() || "";
-      const snippet =
-        card.querySelector("div.job-snippet")?.innerText?.replace(/\s+/g, " ").trim() || "";
-      const salaryOnCard =
-        card.querySelector("div.salary-snippet-container")?.innerText?.trim() || "";
-      const postedAt = card.querySelector("span.date")?.innerText?.trim() || "";
+        anchor.getAttribute("aria-label")?.trim() ||
+        anchor.innerText?.trim() ||
+        getFallbackText(card, ["h2.jobTitle", "span.jobTitle"]);
 
-      let link = anchor?.href || "";
-      if (link && !link.startsWith("http")) {
-        link = "https://www.indeed.com" + link;
+      if (!title) {
+        return;
       }
 
-      if (title && link) {
-        results.push({
-          title,
-          company,
-          location,
-          snippet,
-          salaryOnCard,
-          postedAt,
-          link
-        });
+      let link = anchor.href || "";
+      if (link && !/^https?:/i.test(link)) {
+        link = `https://www.indeed.com${link}`;
       }
+
+      if (!link || seenLinks.has(link)) {
+        return;
+      }
+
+      seenLinks.add(link);
+
+      const company = getFallbackText(card, [
+        "span.companyName",
+        "a.companyOverviewLink",
+        "span[data-testid='company-name']",
+        "div.companyInfo",
+        "div[data-testid='company-name']"
+      ]);
+
+      const location = getFallbackText(card, [
+        "div.companyLocation",
+        "div[data-testid='text-location']",
+        "span[data-testid='location']",
+        "div[data-testid='result-footer'] span"
+      ]);
+
+      const snippet = getFallbackText(card, [
+        "div.job-snippet",
+        "ul.job-snippet",
+        "div[data-testid='job-snippet']",
+        "div[data-testid='jobcard-descriptions']"
+      ]);
+
+      const salaryOnCard = getFallbackText(card, [
+        "div.salary-snippet-container",
+        "div[data-testid='attribute_snippet']",
+        "div[data-testid='detailSalary']",
+        "span[data-testid='salary-snippet']"
+      ]);
+
+      const postedAt = getFallbackText(card, [
+        "span.date",
+        "span[data-testid='myJobsStateDate']",
+        "li[data-testid='myJobsStateDate']",
+        "div[data-testid='result-footer'] span"
+      ]);
+
+      results.push({
+        title,
+        company,
+        location,
+        snippet,
+        salaryOnCard,
+        postedAt,
+        link
+      });
     });
 
     return results;
   });
 
   console.log(`✔ Found ${jobs.length} jobs for: ${role}`);
+
+  if (!jobs.length) {
+    console.log("⚠️  Indeed returned zero job cards. Saving debug snapshot for analysis.");
+    try {
+      await saveDebugSnapshot(page, role, "no-results");
+    } catch (snapshotErr) {
+      console.log(`⚠️  Failed to capture debug snapshot: ${snapshotErr.message}`);
+    }
+  }
 
   const limitedJobs =
     Number.isFinite(configuredJobResultLimit) && configuredJobResultLimit > 0
