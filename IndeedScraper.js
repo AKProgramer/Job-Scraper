@@ -48,11 +48,46 @@ const rolesToScrape =
     : filteredJobRoles;
 
 // ---------------------------------------
+// Location configuration
+// ---------------------------------------
+const configuredLocationInputs = [
+  process.env.JOB_SCRAPER_LOCATIONS,
+  process.env.JOB_SCRAPER_LOCATION
+]
+  .flatMap((value) => (value ? value.split(",") : []))
+  .map((location) => location.trim())
+  .filter(Boolean);
+
+const locationFilters = Array.from(new Set(configuredLocationInputs));
+
+// ---------------------------------------
 // Constants
 // ---------------------------------------
-const BASE_URL = "https://www.indeed.com/jobs?q=";
+const BASE_SEARCH_URL = "https://www.indeed.com/jobs";
 const DESKTOP_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36";
+
+// List of user agents for rotation
+const USER_AGENTS = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/117.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+];
+
+function getRandomUserAgent() {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+}
+
+function buildSearchUrl(role, location) {
+  const params = new URLSearchParams();
+  params.set("q", role);
+  if (location) {
+    params.set("l", location);
+  }
+  return `${BASE_SEARCH_URL}?${params.toString()}`;
+}
 const OUTPUT_DIR = path.join(__dirname, "jobs");
 const DEBUG_DIR = path.join(__dirname, "debug_snapshots");
 
@@ -107,7 +142,7 @@ async function clickIfVisible(page, selector, options = {}) {
   }
 
   try {
-    await handle.click({ delay: 30, ...options });
+    await handle.click({ delay: 20, ...options });
     await sleep(400);
     return true;
   } catch (err) {
@@ -167,7 +202,7 @@ function normalizePostedAt(primary, fallback) {
 // ---------------------------------------
 // Detail page scraping
 // ---------------------------------------
-async function enrichJobDetails(browser, baseJob, searchRole) {
+async function enrichJobDetails(browser, baseJob, searchRole, searchLocation = "") {
   const detailPage = await browser.newPage();
   await detailPage.setUserAgent(DESKTOP_USER_AGENT);
 
@@ -368,6 +403,7 @@ async function enrichJobDetails(browser, baseJob, searchRole) {
 
     return {
       searchRole,
+      searchLocation,
       jobId: extractJobId(baseJob.link),
       jobRole: detail.title || baseJob.title,
       companyName: detail.companyName || baseJob.company,
@@ -399,6 +435,7 @@ async function enrichJobDetails(browser, baseJob, searchRole) {
   } catch (err) {
     return {
       searchRole,
+      searchLocation,
       jobId: extractJobId(baseJob.link),
       jobRole: baseJob.title,
       companyName: baseJob.company,
@@ -425,11 +462,15 @@ async function enrichJobDetails(browser, baseJob, searchRole) {
 // ---------------------------------------
 // Role search results scraping
 // ---------------------------------------
-async function scrapeRole(page, role) {
-  const url = BASE_URL + encodeURIComponent(role);
-  console.log(`🌐 Navigating to: ${url}`);
+async function scrapeRole(page, role, location = null) {
+  const url = buildSearchUrl(role, location || "");
+  const locationSuffix = location ? ` (location: ${location})` : "";
+  console.log(`🌐 Navigating to: ${url}${locationSuffix}`);
 
   await page.goto(url, { waitUntil: "networkidle2", timeout: 0 });
+  // Wait 30 seconds for manual CAPTCHA solving if needed
+  console.log("⏳ Waiting 30 seconds for manual CAPTCHA solving (if needed)...");
+  await pause(page, 30000);
   await dismissConsentAndPopups(page);
   await pause(page, 1500);
   await autoScroll(page);
@@ -591,48 +632,57 @@ async function scrapeRoles(requestedRoles = null) {
     return [];
   }
 
+  const activeLocations = locationFilters.length ? locationFilters : [null];
   const allSavedJobs = [];
   let browser;
   let searchPage;
 
   try {
     browser = await puppeteer.launch({
-      headless: true,
+      headless: false,
       args: ["--no-sandbox", "--disable-setuid-sandbox"]
     });
 
     searchPage = await browser.newPage();
-    await searchPage.setUserAgent(DESKTOP_USER_AGENT);
+    await searchPage.setUserAgent(getRandomUserAgent());
 
     for (const role of roles) {
-      console.log(`\n🔍 Scraping role: ${role}`);
+      for (const location of activeLocations) {
+        const searchLabel = location ? `${role} (${location})` : role;
+        console.log(`\n🔍 Scraping role: ${searchLabel}`);
 
-      try {
-        const summaryJobs = await scrapeRole(searchPage, role);
+        try {
+          const summaryJobs = await scrapeRole(searchPage, role, location);
         const detailedJobs = [];
 
-        for (const job of summaryJobs) {
-          try {
-            const detailedJob = await enrichJobDetails(browser, job, role);
-            detailedJobs.push(detailedJob);
-            console.log(
-              `📥 Collected job (${detailedJobs.length}/${summaryJobs.length}): ${detailedJob.jobRole}`
-            );
-          } catch (detailErr) {
-            console.log(
-              `⚠️  Unable to enrich job "${job.title}": ${detailErr.message}`
-            );
+          for (const job of summaryJobs) {
+            try {
+              const detailedJob = await enrichJobDetails(
+                browser,
+                job,
+                role,
+                location || ""
+              );
+              detailedJobs.push(detailedJob);
+              console.log(
+                `📥 Collected job (${detailedJobs.length}/${summaryJobs.length}): ${detailedJob.jobRole}`
+              );
+            } catch (detailErr) {
+              console.log(
+                `⚠️  Unable to enrich job "${job.title}": ${detailErr.message}`
+              );
+            }
+
+            
           }
 
-          await sleep(750);
+          const savedJobs = await persistRoleJobs(searchLabel, detailedJobs);
+          allSavedJobs.push(...savedJobs);
+
+          await sleep(2000);
+        } catch (err) {
+          console.log(`❌ Error scraping ${searchLabel}: ${err.message}`);
         }
-
-        const savedJobs = await persistRoleJobs(role, detailedJobs);
-        allSavedJobs.push(...savedJobs);
-
-        await sleep(2000);
-      } catch (err) {
-        console.log(`❌ Error scraping ${role}: ${err.message}`);
       }
     }
   } finally {

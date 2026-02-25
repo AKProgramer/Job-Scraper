@@ -2,3 +2,5 @@ jobs/
 generated_posts/
 node_modules/
 .env
+generated_posts/
+debug_snapshots/

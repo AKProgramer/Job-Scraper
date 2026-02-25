@@ -14,6 +14,7 @@ const jobSchema = new mongoose.Schema({
         type: String,
         required: true
     },
+    searchLocation: String,
     jobRole: {
         type: String,
         required: true

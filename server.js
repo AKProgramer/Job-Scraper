@@ -4,6 +4,7 @@ const readline = require('readline');
 const { connectDB } = require('./db');
 const { scrapeRoles: scrapeIndeedRoles } = require('./IndeedScraper');
 const { scrapeRoles: scrapeRozeeRoles } = require('./RozeeScraper');
+const { scrapeRoles: scrapeJobzRoles } = require('./JobzScraper');
 const { publishSnapshots, WORDPRESS_SITES } = require('./contentPublisher');
 
 const SCRAPER_PLATFORMS = {
@@ -14,6 +15,10 @@ const SCRAPER_PLATFORMS = {
     rozee: {
         label: 'Rozee.pk',
         scrape: scrapeRozeeRoles
+    },
+    jobz: {
+        label: 'Jobz.pk',
+        scrape: scrapeJobzRoles
     }
 };
 
@@ -42,11 +47,12 @@ function createPrompt(wordpressSites = {}) {
         ''
     ].join('\n');
 
+    const platformEntries = Object.entries(SCRAPER_PLATFORMS);
+    const platformKeys = platformEntries.map(([key]) => key);
     const platformPrompt = [
         '\nSelect the job platform to scrape first:',
-        '  1) Indeed.com',
-        '  2) Rozee.pk',
-        '  3) Both platforms',
+        ...platformEntries.map(([key, platform], index) => `  ${index + 1}) ${platform.label}`),
+        `  ${platformEntries.length + 1}) All platforms`,
         ''
     ].join('\n');
 
@@ -68,16 +74,36 @@ function createPrompt(wordpressSites = {}) {
 
     const parsePlatformSelection = (input) => {
         const normalized = input.trim().toLowerCase();
-        if (['1', 'indeed', 'indeed.com'].includes(normalized)) {
-            return ['indeed'];
+        if (!normalized) {
+            return null;
         }
-        if (['2', 'rozee', 'rozee.pk'].includes(normalized)) {
-            return ['rozee'];
+
+        if (['both', 'all'].includes(normalized)) {
+            return platformKeys;
         }
-        if (['3', 'both', 'all'].includes(normalized)) {
-            return ['indeed', 'rozee'];
+
+        const numeric = parseInt(normalized, 10);
+        if (!Number.isNaN(numeric)) {
+            if (numeric >= 1 && numeric <= platformKeys.length) {
+                return [platformKeys[numeric - 1]];
+            }
+            if (numeric === platformKeys.length + 1) {
+                return platformKeys;
+            }
         }
-        return null;
+
+        const matchByKey = platformKeys.find((key) => key === normalized);
+        if (matchByKey) {
+            return [matchByKey];
+        }
+
+        const matchByLabel = platformEntries.find(([, platform]) => (platform.label || '').toLowerCase() === normalized);
+        if (matchByLabel) {
+            return [matchByLabel[0]];
+        }
+
+        const matchByLabelVariant = platformEntries.find(([, platform]) => (platform.label || '').toLowerCase().replace(/\.pk|\.com/g, '') === normalized);
+        return matchByLabelVariant ? [matchByLabelVariant[0]] : null;
     };
 
     return {
@@ -98,7 +124,7 @@ function createPrompt(wordpressSites = {}) {
                 if (parsed?.length) {
                     return parsed;
                 }
-                console.log('Please select 1, 2, or 3 to continue.');
+                console.log('Please select one of the listed platform options.');
             }
         },
         async requestRoles() {

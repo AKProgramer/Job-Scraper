@@ -423,7 +423,54 @@ async function publishToWordPress({ title, content, excerpt }, siteConfig) {
     timeout: 30000
   });
 
-  return response.data;
+  let parsed = response.data;
+
+  if (typeof parsed === "string" && parsed.trim()) {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch (parseErr) {
+      const preview = parsed.length > 200 ? `${parsed.slice(0, 200)}…` : parsed;
+      throw new Error(`Unexpected WordPress response format (text): ${preview}`);
+    }
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("WordPress API returned an empty response");
+  }
+
+  if (parsed.success === false) {
+    const extra = parsed.data && typeof parsed.data === "object" ? JSON.stringify(parsed.data) : parsed.data || "";
+    const message = parsed.message || "WordPress API rejected the request";
+    throw new Error(extra ? `${message}: ${extra}` : message);
+  }
+
+  const candidateId = parsed.id ?? parsed.post_id ?? parsed?.data?.id ?? parsed?.data?.post_id;
+  let candidateLink =
+    parsed.link ??
+    parsed?.guid?.rendered ??
+    parsed?.data?.link ??
+    parsed?.data?.permalink ??
+    response.headers?.location;
+
+  if (typeof candidateLink === "string" && /^<.*>$/.test(candidateLink)) {
+    candidateLink = candidateLink.slice(1, -1);
+  }
+
+  if (!candidateId && !candidateLink) {
+    const serialized = JSON.stringify(parsed, null, 2);
+    const preview = serialized.length > 400 ? `${serialized.slice(0, 400)}…` : serialized;
+    throw new Error(`WordPress API response missing post identifier: ${preview}`);
+  }
+
+  const normalized = { ...parsed };
+  if (candidateId && normalized.id == null) {
+    normalized.id = candidateId;
+  }
+  if (candidateLink && normalized.link == null) {
+    normalized.link = candidateLink;
+  }
+
+  return normalized;
 }
 
 async function processJob(job, role, index, siteConfig) {
